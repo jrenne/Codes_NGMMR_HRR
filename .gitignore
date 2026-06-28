@@ -1,0 +1,4 @@
+.DS_Store
+.Rproj.user/
+README.html
+outputs/**/diagnostics_in_progress.csv

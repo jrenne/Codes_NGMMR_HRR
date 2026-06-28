@@ -1,13 +1,13 @@
 # Codes_NGMMR_HRR
 
-Replication code for the revised comment **"How Likely Is an Inflation Disaster? A Comment"** by Sophie Guilloux-Nefussi, Magali Marx, Sarah Mouabbi, and Jean-Paul Renne.
+Replication code for the comment **"How Likely Is an Inflation Disaster? A Comment"** by Sophie Guilloux-Nefussi, Magali Marx, Sarah Mouabbi, and Jean-Paul Renne.
 
 The comment revisits the mapping from option-implied risk-neutral inflation distributions to physical inflation tail probabilities in Hilscher, Raviv, and Reis (2025, hereafter HRR). The code implements two exercises:
 
 1. Applying a model-consistent Epstein-Zin change of measure to the nominal risk-neutral transition matrices estimated by HRR.
 2. Refitting parsimonious nominal risk-neutral transition matrices to HRR's option-implied probability targets, and then applying the same model-consistent change of measure.
 
-The package also produces the three-date numerical example and the diagnostics on 5y5y probability targets used in the revised comment.
+The package also produces the three-date numerical example and the diagnostics on 5y5y probability targets used in the comment.
 
 ## How To Run
 
@@ -17,7 +17,7 @@ Open `Codes_NGMMR_HRR.Rproj` in RStudio and run:
 source("main.R")
 ```
 
-By default, `main.R` uses the stored US and euro-area nominal-Q estimates and regenerates the figures and tables used in the revised comment. This is the fastest mode and typically takes about one minute on a standard computer.
+By default, `main.R` uses the stored US and euro-area nominal-Q estimates and regenerates the figures and tables used in the comment. This is the fastest mode and typically takes about one minute on a standard computer.
 
 To rerun the date-by-date estimation before producing the outputs, set:
 
@@ -48,7 +48,7 @@ The remaining functions use base R.
 
 ## Data Sources
 
-The package is self-contained. The folder `input/` contains upstream data objects from the HRR replication materials and public data files accompanying Hilscher, Raviv, and Reis (2025). These files are used as inputs and are not re-estimated here.
+The package is self-contained. The folder `input/` contains upstream data objects from the HRR replication materials and public data files accompanying Hilscher, Raviv, and Reis (2025). The published HRR paper is available at <https://doi.org/10.1093/rfs/hhaf058>. These files are used as inputs and are not re-estimated here.
 
 The HRR public data page is:
 

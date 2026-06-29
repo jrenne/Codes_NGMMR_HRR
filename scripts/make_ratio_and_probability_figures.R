@@ -31,8 +31,9 @@ tail_bins <- function(threshold) {
   }
 }
 
-tail_prob_5_10_threshold <- function(A, bt, threshold) {
-  bins <- avg_inf_510_fast(A, bt)
+tail_prob_5_10_threshold <- function(A, bt, threshold,
+                                     pi_bar = extended_pi_grid(nrow(A))) {
+  bins <- avg_inf_510_fast(A, bt, pi_bar = pi_bar)
   idx <- tail_bins(threshold)
   c(
     y5 = sum(bins$g5[idx]),
@@ -40,8 +41,9 @@ tail_prob_5_10_threshold <- function(A, bt, threshold) {
   )
 }
 
-tail_prob_5y5y_threshold <- function(A, bt, threshold) {
-  bins <- avg_yoy_6to10_model(A, bt)
+tail_prob_5y5y_threshold <- function(A, bt, threshold,
+                                     pi_bar = extended_pi_grid(nrow(A))) {
+  bins <- forward_average_bins_model(A, bt, pi_bar = pi_bar)
   sum(bins[tail_bins(threshold)])
 }
 
@@ -72,6 +74,7 @@ compute_area_ies_series <- function(area, psi_values = c(1 / 3, 1.5),
   }
 
   infl <- as.numeric(dists$infl)
+  pi_values <- extended_pi_grid(dim(Qn_array)[1])
   bts <- compute_bts(infl)[seq_len(dim(res$gs.data)[3])]
   sprt_z <- as.numeric(dists$sprt.Z[, 1])
   years <- as.integer(dists$years[, 1])
@@ -84,7 +87,6 @@ compute_area_ies_series <- function(area, psi_values = c(1 / 3, 1.5),
     })
   )
 
-  pi_values <- c(-2, seq(-0.5, 4.5, by = 1), 6)
   pi_values_dec <- pi_values / 100
   beta <- 0.99
   gamma <- 3
@@ -107,8 +109,8 @@ compute_area_ies_series <- function(area, psi_values = c(1 / 3, 1.5),
   g_star_h <- exp(-kappa * g) *
     (p_bar_h * alpha_h / (alpha_h - kappa) * z0_h^kappa + 1 - p_bar_h)
 
-  g_tilde <- c(g_tilde_l, rep(exp((1 - gamma) * g), 6), g_tilde_h)
-  g_star <- c(g_star_l, rep(exp(-gamma * g), 6), g_star_h)
+  g_tilde <- c(g_tilde_l, rep(exp((1 - gamma) * g), length(pi_values) - 2L), g_tilde_h)
+  g_star <- c(g_star_l, rep(exp(-gamma * g), length(pi_values) - 2L), g_star_h)
 
   rows <- list()
   row_id <- 1L
@@ -122,12 +124,13 @@ compute_area_ies_series <- function(area, psi_values = c(1 / 3, 1.5),
                                          beta = beta, gamma = gamma, psi = psi)
       P <- sol$P
       for (threshold in c(4, 5)) {
-        q_spot <- tail_prob_5_10_threshold(Qn, bt, threshold)
-        qr_spot <- tail_prob_5_10_threshold(Qr, bt, threshold)
-        p_spot <- tail_prob_5_10_threshold(P, bt, threshold)
-        q_bins <- avg_inf_510_fast(Qn, bt)
-        w5 <- exp(5 * pi_values_dec)
-        w10 <- exp(10 * pi_values_dec)
+        q_spot <- tail_prob_5_10_threshold(Qn, bt, threshold, pi_bar = pi_values)
+        qr_spot <- tail_prob_5_10_threshold(Qr, bt, threshold, pi_bar = pi_values)
+        p_spot <- tail_prob_5_10_threshold(P, bt, threshold, pi_bar = pi_values)
+        q_bins <- avg_inf_510_fast(Qn, bt, pi_bar = pi_values)
+        report_pi_values_dec <- c(-2, seq(-0.5, 4.5, by = 1), 6) / 100
+        w5 <- exp(5 * report_pi_values_dec)
+        w10 <- exp(10 * report_pi_values_dec)
         qrh_5y_bins <- q_bins$g5 * w5 / sum(q_bins$g5 * w5)
         qrh_10y_bins <- q_bins$g10 * w10 / sum(q_bins$g10 * w10)
         idx_tail <- tail_bins(threshold)
@@ -146,10 +149,10 @@ compute_area_ies_series <- function(area, psi_values = c(1 / 3, 1.5),
           threshold = threshold,
           q_5y = q_spot[["y5"]],
           q_10y = q_spot[["y10"]],
-          q_5y5y = tail_prob_5y5y_threshold(Qn, bt, threshold),
+          q_5y5y = tail_prob_5y5y_threshold(Qn, bt, threshold, pi_bar = pi_values),
           qr_5y = qr_spot[["y5"]],
           qr_10y = qr_spot[["y10"]],
-          qr_5y5y = tail_prob_5y5y_threshold(Qr, bt, threshold),
+          qr_5y5y = tail_prob_5y5y_threshold(Qr, bt, threshold, pi_bar = pi_values),
           qrh_5y = sum(qrh_5y_bins[idx_tail]),
           qrh_10y = sum(qrh_10y_bins[idx_tail]),
           q_data_n_5y = sum(dists$data.ZC.N[support_idx, 5, ym$year_id, ym$month]),
@@ -158,7 +161,7 @@ compute_area_ies_series <- function(area, psi_values = c(1 / 3, 1.5),
           q_data_r_10y = sum(dists$data.ZC.Q[support_idx, 10, ym$year_id, ym$month]),
           p_5y = p_spot[["y5"]],
           p_10y = p_spot[["y10"]],
-          p_5y5y = tail_prob_5y5y_threshold(P, bt, threshold),
+          p_5y5y = tail_prob_5y5y_threshold(P, bt, threshold, pi_bar = pi_values),
           ez_converged = sol$converged
         )
         row_id <- row_id + 1L
@@ -248,21 +251,6 @@ plot_probability_threshold_figure <- function(all_series, threshold, output_file
          cex = 1.08, inset = 0.01, xpd = NA)
 }
 
-smooth_na <- function(y, k = 12) {
-  y <- as.numeric(y)
-  for (i in seq_along(y)) {
-    if (!is.finite(y[i]) && i > 1L) {
-      y[i] <- y[i - 1L]
-    }
-  }
-  out <- rep(NA_real_, length(y))
-  for (i in seq_along(y)) {
-    lo <- max(1L, i - k + 1L)
-    out[i] <- mean(y[lo:i], na.rm = TRUE)
-  }
-  out
-}
-
 plot_ratio_figure <- function(all_series, output_file) {
   areas <- c("US", "EZ")
   area_names <- c(US = "U.S.", EZ = "Euro area")
@@ -302,7 +290,7 @@ plot_ratio_figure <- function(all_series, output_file) {
           idx <- s_area$psi == psi_values[i]
           ratio <- s_area[[paste0("p_", horizons[j])]][idx] /
             s_area[[paste0("qr_", horizons[j])]][idx]
-          lines(s_area$date[idx], smooth_na(ratio),
+          lines(s_area$date[idx], ratio,
                 col = "black",
                 lwd = 1 + 2 * (i - 1),
                 lty = j)

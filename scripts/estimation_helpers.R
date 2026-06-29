@@ -91,9 +91,10 @@ rmse_pp <- function(x) {
 
 save_matrix_stack <- function(results, slot, output_file) {
   month_ids <- vapply(results, function(x) x$diagnostics$month, integer(1))
-  arr <- array(NA_real_, dim = c(8, 8, length(results)),
-               dimnames = list(paste0("from_", seq_len(8)),
-                               paste0("to_", seq_len(8)),
+  n_state <- nrow(results[[1]][[slot]])
+  arr <- array(NA_real_, dim = c(n_state, n_state, length(results)),
+               dimnames = list(paste0("from_", seq_len(n_state)),
+                               paste0("to_", seq_len(n_state)),
                                paste0("month_", month_ids)))
   for (i in seq_along(results)) {
     arr[, , i] <- results[[i]][[slot]]

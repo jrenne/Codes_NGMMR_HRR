@@ -9,6 +9,7 @@ source(file.path("scripts", "estimation_helpers.R"))
 make_tail_weight_spec <- function(tail_bin_weight = 3,
                                   tail_moment_weight = 5,
                                   fwd_bin_weight = 1,
+                                  fwd_tail_bin_weight = tail_bin_weight,
                                   tail_weight_side = c("high", "both")) {
   tail_weight_side <- match.arg(tail_weight_side)
   bin_weights <- rep(1, 24)
@@ -20,12 +21,14 @@ make_tail_weight_spec <- function(tail_bin_weight = 3,
                  8 + tail_bins_one_block)
   bin_weights[tail_bins] <- tail_bin_weight
   bin_weights[17:24] <- fwd_bin_weight
+  bin_weights[16 + tail_bins_one_block] <- fwd_tail_bin_weight
 
   list(
     bin_weights = bin_weights,
     tail_moment_weight = tail_moment_weight,
     tail_bin_weight = tail_bin_weight,
     fwd_bin_weight = fwd_bin_weight,
+    fwd_tail_bin_weight = fwd_tail_bin_weight,
     tail_weight_side = tail_weight_side
   )
 }
@@ -88,6 +91,20 @@ weighted_finegrid_loss <- function(model_g5, model_g10, model_fwd,
   }
 
   bin_loss + tail_loss + proxy_loss + bounds_loss
+}
+
+stationary_distribution <- function(A) {
+  n <- nrow(A)
+  M <- t(A) - diag(n)
+  M[n, ] <- 1
+  b <- c(rep(0, n - 1L), 1)
+  out <- as.numeric(solve(M, b))
+  pmax(out, 0) / sum(pmax(out, 0))
+}
+
+long_run_mean_pct <- function(A,
+                              pi_bar_pct = c(-2, seq(-0.5, 4.5, by = 1), 6)) {
+  sum(stationary_distribution(A) * pi_bar_pct)
 }
 
 finegrid_zc_bins <- function(dists, year_id, month_id, horizon,
@@ -313,7 +330,15 @@ fit_one_month_finegrid <- function(month_id,
                                    weight_spec,
                                    include_fwd_target,
                                    fwd_proxy_weight,
-                                   fwd_bounds_weight) {
+                                   fwd_bounds_weight,
+                                   lr_mean_target_pct,
+                                   lr_mean_weight,
+                                   hrr_lr_mean_pct,
+                                   lr_extreme_cap,
+                                   lr_extreme_weight,
+                                   persistence_cap,
+                                   persistence_weight,
+                                   pi_bar) {
   target_g5 <- targets$g5[, month_id]
   target_g10 <- targets$g10[, month_id]
   target_fwd <- targets$fwd[, month_id]
@@ -324,9 +349,9 @@ fit_one_month_finegrid <- function(month_id,
 
   obj <- function(eta) {
     A <- eta_to_structured_mlogit_A(eta, mask = mask, variant = variant)
-    mod <- avg_inf_510_fast(A, bt)
-    fwd <- avg_yoy_6to10_model(A, bt)
-    weighted_finegrid_loss(
+    mod <- avg_inf_510_fast(A, bt, pi_bar = pi_bar)
+    fwd <- forward_average_bins_model(A, bt, pi_bar = pi_bar)
+    loss <- weighted_finegrid_loss(
       model_g5 = mod$g5,
       model_g10 = mod$g10,
       model_fwd = fwd,
@@ -340,6 +365,21 @@ fit_one_month_finegrid <- function(month_id,
       fwd_tail4_bounds = fwd_tail4_bounds,
       fwd_tail4_bounds_weight = fwd_bounds_weight
     )
+    omega <- NULL
+    if (lr_mean_weight > 0) {
+      loss <- loss + lr_mean_weight *
+        ((long_run_mean_pct(A, pi_bar_pct = pi_bar) - lr_mean_target_pct) / 100)^2
+    }
+    if (lr_extreme_weight > 0) {
+      omega <- stationary_distribution(A)
+      excess <- pmax(omega[c(1, length(omega))] - lr_extreme_cap, 0)
+      loss <- loss + lr_extreme_weight * mean(excess^2)
+    }
+    if (persistence_weight > 0) {
+      excess <- pmax(c(A[1, 1], A[nrow(A), ncol(A)]) - persistence_cap, 0)
+      loss <- loss + persistence_weight * mean(excess^2)
+    }
+    loss
   }
 
   fit <- fit_with_nlminb_nm_loops(
@@ -352,8 +392,10 @@ fit_one_month_finegrid <- function(month_id,
   )
 
   A <- eta_to_structured_mlogit_A(fit$par, mask = mask, variant = variant)
-  mod <- avg_inf_510_fast(A, bt)
-  fwd <- avg_yoy_6to10_model(A, bt)
+  mod <- avg_inf_510_fast(A, bt, pi_bar = pi_bar)
+  fwd <- forward_average_bins_model(A, bt, pi_bar = pi_bar)
+  omega <- stationary_distribution(A)
+  lr_mean <- sum(omega * pi_bar)
 
   hrr_g5 <- gs_model[, 1, month_id]
   hrr_g10 <- gs_model[, 2, month_id]
@@ -415,9 +457,29 @@ fit_one_month_finegrid <- function(month_id,
     qtail4_5y5y_bound_violation_ngmmr =
       max(fwd_tail4_bounds[1] - sum(fwd[7:8]), 0) +
       max(sum(fwd[7:8]) - fwd_tail4_bounds[2], 0),
+    lr_mean_target_pct = lr_mean_target_pct,
+    lr_mean_weight = lr_mean_weight,
+    lr_mean_hrr_pct = hrr_lr_mean_pct[month_id],
+    lr_mean_ngmmr_pct = lr_mean,
+    lr_mean_penalty_ngmmr =
+      lr_mean_weight * ((lr_mean - lr_mean_target_pct) / 100)^2,
+    lr_prob_state1_ngmmr = omega[1],
+    lr_prob_state8_ngmmr = omega[length(omega)],
+    lr_extreme_cap = lr_extreme_cap,
+    lr_extreme_weight = lr_extreme_weight,
+    lr_extreme_penalty_ngmmr =
+      lr_extreme_weight * mean(pmax(omega[c(1, 8)] - lr_extreme_cap, 0)^2),
+    persistence_cap = persistence_cap,
+    persistence_weight = persistence_weight,
+    q11_ngmmr = A[1, 1],
+    q88_ngmmr = A[nrow(A), ncol(A)],
+    persistence_penalty_ngmmr =
+      persistence_weight * mean(pmax(c(A[1, 1], A[nrow(A), ncol(A)]) - persistence_cap, 0)^2),
     fwd_proxy_weight = fwd_proxy_weight,
     fwd_bounds_weight = fwd_bounds_weight,
     tail_bin_weight = weight_spec$tail_bin_weight,
+    fwd_bin_weight = weight_spec$fwd_bin_weight,
+    fwd_tail_bin_weight = weight_spec$fwd_tail_bin_weight,
     tail_moment_weight = weight_spec$tail_moment_weight,
     tail_weight_side = weight_spec$tail_weight_side,
     valid_A = is_valid_transition_matrix(A)
@@ -471,18 +533,27 @@ main <- function() {
   tail_bin_weight <- as.numeric(Sys.getenv("TAIL_BIN_WEIGHT", unset = "1.5"))
   tail_moment_weight <- as.numeric(Sys.getenv("TAIL_MOMENT_WEIGHT", unset = "2"))
   fwd_bin_weight <- as.numeric(Sys.getenv("FWD_BIN_WEIGHT", unset = "1"))
+  fwd_tail_bin_weight <- as.numeric(Sys.getenv("FWD_TAIL_BIN_WEIGHT", unset = as.character(tail_bin_weight)))
   tail_weight_side <- Sys.getenv("TAIL_WEIGHT_SIDE", unset = "high")
   include_fwd_target <- as.logical(as.integer(Sys.getenv("INCLUDE_5Y5Y_TARGET", unset = "1")))
   fwd_target_source <- Sys.getenv("FWD_TARGET_SOURCE", unset = "gaussian")
   fwd_proxy_rho_input <- Sys.getenv("FWD_PROXY_RHO", unset = "data")
   fwd_proxy_weight <- as.numeric(Sys.getenv("FWD_PROXY_WEIGHT", unset = "0.2"))
   fwd_bounds_weight <- as.numeric(Sys.getenv("FWD_BOUNDS_WEIGHT", unset = "0"))
+  lr_mean_target_pct <- as.numeric(Sys.getenv("LR_MEAN_TARGET_PCT", unset = "2.5"))
+  lr_mean_weight <- as.numeric(Sys.getenv("LR_MEAN_WEIGHT", unset = "0"))
+  lr_extreme_cap <- as.numeric(Sys.getenv("LR_EXTREME_CAP", unset = "0.05"))
+  lr_extreme_weight <- as.numeric(Sys.getenv("LR_EXTREME_WEIGHT", unset = "0"))
+  persistence_cap <- as.numeric(Sys.getenv("PERSISTENCE_CAP", unset = "0.85"))
+  persistence_weight <- as.numeric(Sys.getenv("PERSISTENCE_WEIGHT", unset = "0"))
   eta_start_file <- Sys.getenv("ETA_START_FILE", unset = "")
   variant <- Sys.getenv("MODEL_VARIANT", unset = "smooth_row_poly2")
+  pi_bar <- extended_pi_grid(8L)
   weight_spec <- make_tail_weight_spec(
     tail_bin_weight = tail_bin_weight,
     tail_moment_weight = tail_moment_weight,
     fwd_bin_weight = fwd_bin_weight,
+    fwd_tail_bin_weight = fwd_tail_bin_weight,
     tail_weight_side = tail_weight_side
   )
 
@@ -507,10 +578,29 @@ main <- function() {
     fwd_weight_tag <- gsub("\\.", "p", format(fwd_bin_weight, trim = TRUE))
     out_name <- paste0(out_name, "_gauss5y5yRho", rho_tag,
                        "_fwdBinW", fwd_weight_tag)
+    if (!isTRUE(all.equal(fwd_tail_bin_weight, tail_bin_weight))) {
+      fwd_tail_weight_tag <- gsub("\\.", "p", format(fwd_tail_bin_weight, trim = TRUE))
+      out_name <- paste0(out_name, "_fwdTailW", fwd_tail_weight_tag)
+    }
   }
   if (fwd_bounds_weight > 0) {
     bounds_tag <- gsub("\\.", "p", format(fwd_bounds_weight, trim = TRUE))
     out_name <- paste0(out_name, "_frechet5y5yW", bounds_tag)
+  }
+  if (lr_mean_weight > 0) {
+    lr_target_tag <- gsub("\\.", "p", format(lr_mean_target_pct, trim = TRUE))
+    lr_weight_tag <- gsub("\\.", "p", format(lr_mean_weight, trim = TRUE))
+    out_name <- paste0(out_name, "_lrMean", lr_target_tag, "W", lr_weight_tag)
+  }
+  if (lr_extreme_weight > 0) {
+    lr_cap_tag <- gsub("\\.", "p", format(100 * lr_extreme_cap, trim = TRUE))
+    lr_extreme_weight_tag <- gsub("\\.", "p", format(lr_extreme_weight, trim = TRUE))
+    out_name <- paste0(out_name, "_lrExtremeCap", lr_cap_tag, "W", lr_extreme_weight_tag)
+  }
+  if (persistence_weight > 0) {
+    persistence_cap_tag <- gsub("\\.", "p", format(100 * persistence_cap, trim = TRUE))
+    persistence_weight_tag <- gsub("\\.", "p", format(persistence_weight, trim = TRUE))
+    out_name <- paste0(out_name, "_persistCap", persistence_cap_tag, "W", persistence_weight_tag)
   }
   out_name <- paste0(area, "_", out_name)
   out_dir <- file.path(getwd(), "outputs", out_name)
@@ -528,6 +618,10 @@ main <- function() {
 
   gs_model <- unwrap_matlab_cell(res$gs.model)
   fs_model <- unwrap_matlab_cell(res$fs.model)
+  pinew <- unwrap_matlab_cell(res$pinew)
+  hrr_lr_mean_pct <- vapply(seq_len(ncol(pinew)), function(k) {
+    long_run_mean_pct(amatrix_hrr_101(pinew[, k]))
+  }, numeric(1))
   infl <- as.numeric(dists$infl)
   n_month <- dim(res$gs.data)[3]
   bts <- compute_bts(infl)[seq_len(n_month)]
@@ -552,6 +646,7 @@ main <- function() {
   message(sprintf("Weights: side=%s, tail bins=%g, explicit tail moments=%g.",
                   tail_weight_side, tail_bin_weight, tail_moment_weight))
   message(sprintf("5y5y bin weight: %g.", fwd_bin_weight))
+  message(sprintf("5y5y high-tail bin weight: %g.", fwd_tail_bin_weight))
   message(sprintf("Objective includes 5y5y target: %s.",
                   ifelse(include_fwd_target, "yes", "no")))
   message(sprintf("5y5y target source: %s; rho=%.4f.",
@@ -563,6 +658,18 @@ main <- function() {
   if (fwd_bounds_weight > 0) {
     message(sprintf("Objective penalizes 5y5y >4 Frechet-bound violations with weight %g.",
                     fwd_bounds_weight))
+  }
+  if (lr_mean_weight > 0) {
+    message(sprintf("Objective includes long-run nominal-Q mean target %.2f%% with weight %g.",
+                    lr_mean_target_pct, lr_mean_weight))
+  }
+  if (lr_extreme_weight > 0) {
+    message(sprintf("Objective penalizes stationary probabilities of states 1 and 8 above %.2f%% with weight %g.",
+                    100 * lr_extreme_cap, lr_extreme_weight))
+  }
+  if (persistence_weight > 0) {
+    message(sprintf("Objective penalizes Q11 and Q88 above %.2f%% with weight %g.",
+                    100 * persistence_cap, persistence_weight))
   }
   if (!is.null(eta_start_by_month)) {
     message(sprintf("Warm starts: %s", eta_start_file))
@@ -592,7 +699,15 @@ main <- function() {
       weight_spec = weight_spec,
       include_fwd_target = include_fwd_target,
       fwd_proxy_weight = fwd_proxy_weight,
-      fwd_bounds_weight = fwd_bounds_weight
+      fwd_bounds_weight = fwd_bounds_weight,
+      lr_mean_target_pct = lr_mean_target_pct,
+      lr_mean_weight = lr_mean_weight,
+      hrr_lr_mean_pct = hrr_lr_mean_pct,
+      lr_extreme_cap = lr_extreme_cap,
+      lr_extreme_weight = lr_extreme_weight,
+      persistence_cap = persistence_cap,
+      persistence_weight = persistence_weight,
+      pi_bar = pi_bar
     )
     if (verbose) {
       message(sprintf("Finished month %03d: HRR %.3f pp, NGMMR %.3f pp.",

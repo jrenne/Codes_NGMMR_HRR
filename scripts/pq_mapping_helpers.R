@@ -76,7 +76,7 @@ tail_prob_5_10 <- function(A, bt, side = c("high", "low")) {
 
 tail_prob_5y5y_proxy <- function(A, bt, side = c("high", "low")) {
   side <- match.arg(side)
-  fwd_bins <- avg_yoy_6to10_model(A, bt)
+  fwd_bins <- forward_average_bins_model(A, bt)
   idx <- if (side == "high") 7:8 else 1:2
   sum(fwd_bins[idx])
 }

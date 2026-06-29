@@ -106,6 +106,7 @@ avg_inf_510_fast <- function(A, bt,
                              pi_bar = c(-2, seq(-0.5, 4.5, by = 1), 6),
                              pi_lim = c(seq(-1, 5, by = 1), Inf)) {
   n_state <- length(pi_bar)
+  n_bin <- length(pi_lim)
   stopifnot(
     all(dim(A) == c(n_state, n_state)),
     bt >= 1,
@@ -149,9 +150,9 @@ avg_inf_510_fast <- function(A, bt,
       cum_sum <- used - offset
       avg <- (cum_sum / step) / h
 
-      bin <- length(pi_bar) + 1L - rowSums(outer(avg, pi_lim, function(a, lim) lim - a > -1e-7))
-      gg <- numeric(n_state)
-      for (b in seq_len(n_state)) {
+      bin <- n_bin + 1L - rowSums(outer(avg, pi_lim, function(a, lim) lim - a > -1e-7))
+      gg <- numeric(n_bin)
+      for (b in seq_len(n_bin)) {
         gg[b] <- sum(cum_prob[used[bin == b]])
       }
       out[[as.character(h)]] <- gg

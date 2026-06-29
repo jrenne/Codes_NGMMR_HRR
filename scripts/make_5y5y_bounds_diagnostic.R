@@ -85,8 +85,71 @@ bound_event_probability <- function(p_x, p_z, event_matrix) {
   c(lower = max(lower, 0), upper = min(upper, 1))
 }
 
+tail_idx_for_threshold <- function(threshold) {
+  if (threshold == 4) {
+    7:8
+  } else if (threshold == 5) {
+    8
+  } else {
+    stop("Only thresholds 4 and 5 are implemented.")
+  }
+}
+
+forward_average_bins_model <- function(A, bt,
+                                       pi_bar = c(-2, seq(-0.5, 4.5, by = 1), 6),
+                                       pi_lim = c(seq(-1, 5, by = 1), Inf)) {
+  n_state <- length(pi_bar)
+  step <- 2L
+  x_int <- as.integer(round(step * pi_bar))
+  min_sum <- 5L * min(x_int)
+  max_sum <- 5L * max(x_int)
+  offset <- 1L - min_sum
+  n_sum <- max_sum - min_sum + 1L
+
+  dist_state <- numeric(n_state)
+  dist_state[bt] <- 1
+  dist_fwd <- matrix(0, n_state, n_sum)
+
+  for (h in seq_len(10)) {
+    if (h <= 5) {
+      dist_state <- as.numeric(dist_state %*% A)
+    } else {
+      next_fwd <- matrix(0, n_state, n_sum)
+      for (j in seq_len(n_state)) {
+        if (h == 6) {
+          mass_by_sum <- sum(dist_state * A[, j])
+          idx_new <- offset + x_int[j]
+          next_fwd[j, idx_new] <- next_fwd[j, idx_new] + mass_by_sum
+        } else {
+          mass_by_sum <- as.numeric(crossprod(A[, j], dist_fwd))
+          idx_old <- which(mass_by_sum != 0)
+          idx_new <- idx_old + x_int[j]
+          keep <- idx_new >= 1L & idx_new <= n_sum
+          next_fwd[j, idx_new[keep]] <- next_fwd[j, idx_new[keep]] +
+            mass_by_sum[idx_old[keep]]
+        }
+      }
+      dist_fwd <- next_fwd
+    }
+  }
+
+  cum_prob <- colSums(dist_fwd)
+  used <- which(cum_prob != 0)
+  cum_sum <- used - offset
+  avg <- (cum_sum / step) / 5
+
+  bin <- length(pi_bar) + 1L -
+    rowSums(outer(avg, pi_lim, function(a, lim) lim - a > -1e-7))
+  out <- numeric(n_state)
+  for (b in seq_len(n_state)) {
+    out[b] <- sum(cum_prob[used[bin == b]])
+  }
+  out / sum(out)
+}
+
 gaussian_forward_tail_proxy <- function(p5, p10, rho,
                                         support_pct,
+                                        threshold,
                                         min_sd = 0.25) {
   mean5 <- sum(p5 * support_pct)
   mean10 <- sum(p10 * support_pct)
@@ -101,7 +164,7 @@ gaussian_forward_tail_proxy <- function(p5, p10, rho,
 
   sd_fwd <- -rho * sqrt(var5) + sqrt(disc)
   sd_fwd <- max(sd_fwd, min_sd)
-  min(max(1 - pnorm(4, mean = mean_fwd, sd = sd_fwd), 0), 1)
+  min(max(1 - pnorm(threshold, mean = mean_fwd, sd = sd_fwd), 0), 1)
 }
 
 default_estimation_out_dir <- function(area) {
@@ -113,15 +176,19 @@ default_estimation_out_dir <- function(area) {
   file.path("outputs", paste0(area, suffix))
 }
 
-make_bounds_series <- function(area = "US") {
+make_bounds_series <- function(area = "US", threshold = 4) {
   area <- normalize_hrr_area(area)
+  threshold <- as.numeric(threshold)
   dists <- load_hrr_dists(area)
   ym <- make_year_month_index(dists)
   tails_55 <- read_dta(file.path("input", sprintf("%s_55tails_monthly.dta", area)))
-  diag <- read.csv(file.path(default_estimation_out_dir(area), "diagnostics.csv"))
+  results <- readRDS(file.path(default_estimation_out_dir(area), "all_results.rds"))
+  bts <- compute_bts(as.numeric(dists$infl))[seq_len(nrow(ym))]
 
   support <- as.numeric(dists$sprt.Z[, 1])
-  event <- outer(support, support, function(x, z) 2 * z - x > 0.04)
+  event <- outer(support, support, function(x, z) 2 * z - x > threshold / 100)
+  tail_idx <- tail_idx_for_threshold(threshold)
+  hrr_col <- paste0("tail", threshold, "_5y5y")
 
   rows <- lapply(seq_len(nrow(ym)), function(m) {
     p5 <- as.numeric(dists$data.ZC.N[, 5, ym$year_id[m], ym$month[m]])
@@ -133,20 +200,23 @@ make_bounds_series <- function(area = "US") {
       stop(sprintf("Could not find unique HRR 5y5y row for %s month %03d.",
                    area, m))
     }
-    diag_row <- diag[diag$month == m, ]
-
     data.frame(
       area = area,
       month = m,
       date = as.Date(sprintf("%04d-%02d-01", ym$year[m], ym$month[m])),
+      threshold = threshold,
       lower = b[["lower"]],
       upper = b[["upper"]],
-      gaussian_rho_min = gaussian_forward_tail_proxy(p5, p10, rho = -1,
-                                                     support_pct = 100 * support),
-      gaussian_rho_max = gaussian_forward_tail_proxy(p5, p10, rho = 1,
-                                                     support_pct = 100 * support),
-      hrr_proxy = tail_row$tail4_5y5y,
-      ngmmr_5y5y = diag_row$qtail4_5y5y_ngmmr
+      gaussian_rho_min = gaussian_forward_tail_proxy(p5, p10, rho = -0.7,
+                                                     support_pct = 100 * support,
+                                                     threshold = threshold),
+      gaussian_rho_max = gaussian_forward_tail_proxy(p5, p10, rho = 0.7,
+                                                     support_pct = 100 * support,
+                                                     threshold = threshold),
+      hrr_proxy = tail_row[[hrr_col]],
+      ngmmr_5y5y = sum(forward_average_bins_model(
+        results[[m]]$A, bts[m]
+      )[tail_idx])
     )
   })
 
@@ -154,42 +224,58 @@ make_bounds_series <- function(area = "US") {
 }
 
 plot_bounds_series <- function(bounds, output_file) {
-  pdf(output_file, pointsize = 15, width = 10, height = 5.8)
-  oldpar <- par(mar = c(4, 4.4, 1.2, 1))
+  areas <- c("US", "EZ")
+  area_names <- c(US = "U.S.", EZ = "Euro area")
+
+  pdf(output_file, pointsize = 15, width = 12.2, height = 8.8)
+  oldpar <- par(mfrow = c(2, 2), mar = c(3.5, 4.4, 2.2, 1),
+                oma = c(1.45, 0, 0, 0))
   on.exit({
     par(oldpar)
     dev.off()
   }, add = TRUE)
 
-  ymax <- max(100 * c(bounds$lower, bounds$upper,
-                      bounds$gaussian_rho_min, bounds$gaussian_rho_max,
-                      bounds$hrr_proxy, bounds$ngmmr_5y5y),
-              na.rm = TRUE) * 1.08
-  plot(bounds$date, 100 * bounds$upper, type = "n",
-       ylim = c(0, ymax), las = 1, xlab = "", ylab = "Probability (%)")
-  grid()
-  polygon(c(bounds$date, rev(bounds$date)),
-          100 * c(bounds$lower, rev(bounds$upper)),
-          col = "gray88", border = NA)
-  lines(bounds$date, 100 * bounds$gaussian_rho_min,
-        col = "gray45", lwd = 1.7, lty = 3)
-  lines(bounds$date, 100 * bounds$gaussian_rho_max,
-        col = "gray45", lwd = 1.7, lty = 3)
-  lines(bounds$date, 100 * bounds$ngmmr_5y5y,
-        col = "black", lwd = 2.6, lty = 1)
-  lines(bounds$date, 100 * bounds$hrr_proxy,
-        col = "black", lwd = 2.6, lty = 2)
-  legend("topright",
-         legend = c("Frechet bounds",
-                    "Gaussian proxy, rho=-1",
-                    "Gaussian proxy, rho=1",
-                    "NGMMR Q 5y5y",
-                    "HRR 5y5y proxy"),
-         col = c("gray88", "gray45", "gray45", "black", "black"),
-         lty = c(1, 3, 3, 1, 2),
-         lwd = c(8, 1.7, 1.7, 2.6, 2.6),
+  for (area in areas) {
+    for (threshold in c(4, 5)) {
+    b <- bounds[bounds$area == area & bounds$threshold == threshold, ]
+    ymax <- max(100 * c(b$lower, b$upper,
+                        b$gaussian_rho_min, b$gaussian_rho_max,
+                        b$hrr_proxy, b$ngmmr_5y5y),
+                na.rm = TRUE) * 1.08
+    plot(b$date, 100 * b$upper, type = "n",
+         ylim = c(0, ymax), las = 1, xlab = "", ylab = "Probability (%)",
+         main = sprintf("%s, pi > %d%%", area_names[[area]], threshold))
+    grid()
+    polygon(c(b$date, rev(b$date)),
+            100 * c(b$lower, rev(b$upper)),
+            col = "gray88", border = NA)
+    lines(b$date, 100 * b$gaussian_rho_min,
+          col = "gray45", lwd = 1.7, lty = 3)
+    lines(b$date, 100 * b$gaussian_rho_max,
+          col = "gray45", lwd = 1.7, lty = 3)
+    lines(b$date, 100 * b$ngmmr_5y5y,
+          col = "black", lwd = 2.6, lty = 1)
+    lines(b$date, 100 * b$hrr_proxy,
+          col = "black", lwd = 2.6, lty = 2)
+    }
+  }
+
+  par(fig = c(0, 1, 0, 1), new = TRUE, mar = c(0, 0, 0, 0), oma = c(0, 0, 0, 0))
+  plot.new()
+  legend("bottom",
+         legend = c("Bounds",
+                    "Gaussian",
+                    "NGMMR",
+                    "HRR proxy"),
+         col = c("gray88", "gray45", "black", "black"),
+         lty = c(1, 3, 1, 2),
+         lwd = c(8, 1.7, 2.6, 2.6),
          bg = "white",
-         box.col = "gray80")
+         box.col = "gray80",
+         cex = 0.76,
+         horiz = TRUE,
+         xpd = NA,
+         inset = -0.01)
 
   invisible(output_file)
 }
@@ -198,7 +284,11 @@ main <- function() {
   out_dir <- file.path(getwd(), "outputs", "hrr_nominal_real_q_diagnostics")
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
-  bounds <- make_bounds_series("US")
+  bounds <- do.call(rbind, lapply(c("US", "EZ"), function(area) {
+    do.call(rbind, lapply(c(4, 5), function(threshold) {
+      make_bounds_series(area, threshold)
+    }))
+  }))
   bounds$below_lower <- bounds$hrr_proxy < bounds$lower - 1e-8
   bounds$above_upper <- bounds$hrr_proxy > bounds$upper + 1e-8
 
@@ -206,18 +296,26 @@ main <- function() {
   summary_file <- file.path(out_dir, "5y5y_tail_bounds_from_5y_10y_summary.csv")
   pdf_file <- file.path(out_dir, "5y5y_tail_bounds_from_5y_10y.pdf")
 
-  summary <- data.frame(
-    mean_lower = mean(bounds$lower),
-    mean_upper = mean(bounds$upper),
-    mean_gaussian_rho_min = mean(bounds$gaussian_rho_min, na.rm = TRUE),
-    mean_gaussian_rho_max = mean(bounds$gaussian_rho_max, na.rm = TRUE),
-    mean_hrr_proxy = mean(bounds$hrr_proxy),
-    mean_ngmmr = mean(bounds$ngmmr_5y5y),
-    share_hrr_below_lower = mean(bounds$below_lower),
-    share_hrr_above_upper = mean(bounds$above_upper),
-    min_hrr_minus_lower_pp = 100 * min(bounds$hrr_proxy - bounds$lower),
-    max_hrr_minus_upper_pp = 100 * max(bounds$hrr_proxy - bounds$upper)
-  )
+  summary_rows <- lapply(c("US", "EZ"), function(area) {
+    do.call(rbind, lapply(c(4, 5), function(threshold) {
+      b <- bounds[bounds$area == area & bounds$threshold == threshold, ]
+      data.frame(
+        area = area,
+        threshold = threshold,
+        mean_lower = mean(b$lower),
+        mean_upper = mean(b$upper),
+        mean_gaussian_rho_min = mean(b$gaussian_rho_min, na.rm = TRUE),
+        mean_gaussian_rho_max = mean(b$gaussian_rho_max, na.rm = TRUE),
+        mean_hrr_proxy = mean(b$hrr_proxy),
+        mean_ngmmr = mean(b$ngmmr_5y5y),
+        share_hrr_below_lower = mean(b$below_lower),
+        share_hrr_above_upper = mean(b$above_upper),
+        min_hrr_minus_lower_pp = 100 * min(b$hrr_proxy - b$lower),
+        max_hrr_minus_upper_pp = 100 * max(b$hrr_proxy - b$upper)
+      )
+    }))
+  })
+  summary <- do.call(rbind, summary_rows)
 
   write.csv(bounds, csv_file, row.names = FALSE)
   write.csv(summary, summary_file, row.names = FALSE)

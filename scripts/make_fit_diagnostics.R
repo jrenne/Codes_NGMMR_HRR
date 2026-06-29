@@ -131,7 +131,7 @@ fit_hrr_form_one_month <- function(result, bt, eta0,
   obj <- function(eta) {
     A <- amatrix_hrr_101(z_to_hrr_theta(eta))
     mod <- avg_inf_510_fast(A, bt)
-    fwd <- avg_yoy_6to10_model(A, bt)
+    fwd <- forward_average_bins_model(A, bt)
     weighted_finegrid_loss(
       model_g5 = mod$g5,
       model_g10 = mod$g10,
@@ -154,7 +154,9 @@ fit_hrr_form_one_month <- function(result, bt, eta0,
   )
   A <- amatrix_hrr_101(z_to_hrr_theta(fit$par))
   mod <- avg_inf_510_fast(A, bt)
-  list(par = fit$par, value = fit$objective, g5 = mod$g5, g10 = mod$g10)
+  fwd <- forward_average_bins_model(A, bt)
+  list(par = fit$par, value = fit$objective, g5 = mod$g5, g10 = mod$g10,
+       fwd = fwd)
 }
 
 make_hrr_form_refit_series <- function(area, output_dir,
@@ -192,8 +194,8 @@ make_hrr_form_refit_series <- function(area, output_dir,
     row_id <- 1L
     for (threshold in c(4, 5)) {
       idx <- tail_idx(threshold)
-      for (h in c("5y", "10y")) {
-        slot <- if (h == "5y") "g5" else "g10"
+      for (h in c("5y", "10y", "5y5y")) {
+        slot <- switch(h, "5y" = "g5", "10y" = "g10", "5y5y" = "fwd")
         rows_i[[row_id]] <- data.frame(
           area = area,
           month = diagnostics$month[i],

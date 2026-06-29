@@ -31,7 +31,15 @@ at the top of `main.R`. The estimation is parallelized with the `parallel` packa
 N_CORES <- 8
 ```
 
-With `REESTIMATE <- TRUE`, `main.R` reports progress by batches of dates and writes temporary `diagnostics_in_progress.csv` files in the relevant output folders.
+The baseline date-by-date estimation uses:
+
+```r
+NB_LOOP <- 3
+NLMINB_ITER <- 20
+NM_ITER <- 1000
+```
+
+With `REESTIMATE <- TRUE`, `main.R` reports progress by batches of dates and writes temporary `diagnostics_in_progress.csv` files in the relevant output folders. Runtime depends on the machine and on the number of cores; it is substantially longer than the default reproduction mode.
 
 ## Software Requirements
 
@@ -70,7 +78,7 @@ In the scripts:
 - `results_est_101_*_monthquart.mat` contains HRR's estimated transition-matrix objects and model-implied probability targets.
 - `dists_*.mat` contains HRR option-implied nominal and real risk-neutral distribution objects.
 - `*westimates.dta` contains HRR reported physical probability series.
-- `*_55tails_monthly.dta` contains HRR 5y5y tail-proxy inputs used for diagnostics and auxiliary targets.
+- `*_55tails_monthly.dta` contains HRR's 5y5y nominal tail inputs, used in the 5y5y compatibility diagnostics and comparison figures.
 
 No external data are downloaded by the scripts. The package reads the files in `input/`, regenerates derived estimates and figures, and writes outputs under `outputs/`.
 
@@ -78,20 +86,19 @@ No external data are downloaded by the scripts. The package reads the files in `
 
 Running `source("main.R")` regenerates:
 
-- `outputs/comment_figures/figure_ratios.pdf`
-- `outputs/comment_figures/HRR_model_consistent_P_gt4.pdf`
+- `outputs/comment_figures/figure_ratios_HRR.pdf`
+- `outputs/comment_figures/model_consistent_P_comparison_gt4.pdf`
 - `outputs/comment_figures/nominal_Q_tail_fit_HRR_NGMMR_gt4.pdf`
 - `outputs/comment_figures/nominal_Q_tail_rmse_table.tex`
 - `outputs/comment_figures/figure_IES_6plots_HRR_gt4.pdf`
 - `outputs/comment_figures/figure_ratios_NGMMR.pdf`
 - `outputs/hrr_nominal_real_q_diagnostics/5y5y_tail_bounds_from_5y_10y.pdf`
-- `outputs/hrr_nominal_real_q_diagnostics/5y5y_gaussian_student_proxy_df5.pdf`
 - `outputs/three_date_ez_example/three_date_ez_table_rows.tex`
 
 When `REESTIMATE <- FALSE`, the code uses the stored estimates in:
 
-- `outputs/US_nominal_Q_refit_smooth_row_poly2_finegrid_targets_hightailbin1p5_tailmoment2_moment5y5yW0p2_gauss5y5yRhodata_fwdBinW1/`
-- `outputs/EZ_nominal_Q_refit_smooth_row_poly2_finegrid_targets_hightailbin1p5_tailmoment2_moment5y5yW0p2_gauss5y5yRhodata_fwdBinW1/`
+- `outputs/US_nominal_Q_refit_smooth_row_poly3_finegrid_targets_hightailbin2_tailmoment2_spot_only_lrMean2p5W10_lrExtremeCap20W5_thetaShrinkW0p05/`
+- `outputs/EZ_nominal_Q_refit_smooth_row_poly3_finegrid_targets_hightailbin2_tailmoment2_spot_only_lrMean2p5W10_lrExtremeCap20W5_thetaShrinkW0p05/`
 
 Each folder contains:
 
@@ -105,22 +112,23 @@ All active scripts are stored in `scripts/`.
 
 - `three_date_ez_example.R`: numerical three-date Epstein-Zin example and LaTeX table rows.
 - `hrr_model_bins.R`: HRR transition-matrix construction and model-implied bin probabilities.
-- `qn_parameterization.R`: active six-parameter nominal risk-neutral transition-matrix parameterization.
+- `qn_parameterization.R`: nominal risk-neutral transition-matrix parameterizations.
 - `estimation_helpers.R`: optimization and date-loop helpers.
 - `estimate_nominal_q.R`: date-by-date estimation of nominal-Q matrices for `AREA = "US"` or `AREA = "EZ"`.
 - `pq_mapping_helpers.R`: nominal-to-real and real-to-physical probability mappings.
 - `make_ratio_and_probability_figures.R`: ratio and physical-probability figures.
 - `make_fit_diagnostics.R`: HRR-consistent-probability figures, nominal-Q fit diagnostics, and RMSE table.
 - `make_5y5y_bounds_diagnostic.R`: Frechet-Hoeffding-bound diagnostic for the 5y5y high-inflation probability.
-- `make_5y5y_student_proxy_diagnostic.R`: Gaussian and Student-t auxiliary 5y5y proxy diagnostic.
 
-The active nominal-Q specification is the six-parameter `smooth_row_poly2` parameterization. It preserves HRR's zero pattern and uses quadratic destination-state logits whose slope and curvature vary smoothly with the current inflation state.
+The active nominal-Q specification is the nine-parameter `smooth_row_poly3` parameterization. It preserves HRR's zero pattern and uses cubic destination-state logits whose coefficients vary smoothly with the current inflation state. The target set contains only the 5-year and 10-year nominal risk-neutral binned distributions. The 5y5y probabilities are then implied by the fitted transition matrices and used as diagnostics. The estimated matrices are shrunk toward area-specific empirical centers stored in `tempo/smooth_row_poly3_shrinkage/`, with weak long-run plausibility penalties matching the baseline settings in `main.R`.
 
 ## Reproducibility Notes
 
 Run the code from the project root, i.e., the folder containing `main.R`.
 
 The default `REESTIMATE <- FALSE` mode is intended for fast reproduction of the figures and tables. The `REESTIMATE <- TRUE` mode documents and reruns the estimation step that produced the stored nominal-Q matrices.
+
+Model-consistent P/Q series used by several figures are cached under `cache/` so that regenerating charts does not repeatedly solve the same Epstein-Zin fixed-point problems.
 
 ## License
 

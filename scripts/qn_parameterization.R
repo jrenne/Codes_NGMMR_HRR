@@ -49,6 +49,68 @@ eta_to_smooth_row_poly2_A <- function(eta, mask = hrr_zero_pattern()) {
   A
 }
 
+eta_to_smooth_row_poly3_A <- function(eta, mask = hrr_zero_pattern()) {
+  ## Nine-parameter smooth cubic logit.  Each row is a cubic logit in the
+  ## destination state; the three destination-polynomial coefficients vary
+  ## quadratically with the current state.
+  stopifnot(length(eta) == 9L)
+
+  n_state <- nrow(mask)
+  A <- matrix(0, n_state, n_state)
+
+  for (i in seq_len(n_state)) {
+    allowed <- which(mask[i, ])
+    si <- scale_state(i, n_state)
+    sj <- scale_state(allowed, n_state)
+    beta1 <- eta[1] + eta[2] * si + eta[3] * si^2
+    beta2 <- eta[4] + eta[5] * si + eta[6] * si^2
+    beta3 <- eta[7] + eta[8] * si + eta[9] * si^2
+    A[i, allowed] <- stable_softmax(beta1 * sj + beta2 * sj^2 + beta3 * sj^3)
+  }
+
+  A
+}
+
+eta_to_smooth_row_poly3_extreme_A <- function(eta, mask = hrr_zero_pattern()) {
+  ## Sixteen-parameter smooth cubic logit with separate extreme-destination
+  ## scores.  Middle destinations use the smooth cubic specification; states 1
+  ## and 8 have their own quadratic functions of the current state, plus one
+  ## common tilt for persistence in the two extreme rows.
+  stopifnot(length(eta) == 16L)
+
+  n_state <- nrow(mask)
+  A <- matrix(0, n_state, n_state)
+
+  for (i in seq_len(n_state)) {
+    allowed <- which(mask[i, ])
+    si <- scale_state(i, n_state)
+    sj <- scale_state(allowed, n_state)
+    beta1 <- eta[1] + eta[2] * si + eta[3] * si^2
+    beta2 <- eta[4] + eta[5] * si + eta[6] * si^2
+    beta3 <- eta[7] + eta[8] * si + eta[9] * si^2
+    scores <- beta1 * sj + beta2 * sj^2 + beta3 * sj^3
+
+    low_pos <- which(allowed == 1L)
+    if (length(low_pos) == 1L) {
+      scores[low_pos] <- eta[10] + eta[11] * si + eta[12] * si^2
+    }
+
+    high_pos <- which(allowed == n_state)
+    if (length(high_pos) == 1L) {
+      scores[high_pos] <- eta[13] + eta[14] * si + eta[15] * si^2
+    }
+
+    diag_extreme_pos <- which(allowed == i & i %in% c(1L, n_state))
+    if (length(diag_extreme_pos) == 1L) {
+      scores[diag_extreme_pos] <- scores[diag_extreme_pos] + eta[16]
+    }
+
+    A[i, allowed] <- stable_softmax(scores)
+  }
+
+  A
+}
+
 inv_logit <- function(x) {
   1 / (1 + exp(-x))
 }
@@ -192,6 +254,12 @@ eta_to_structured_mlogit_A <- function(eta,
   if (variant == "smooth_row_poly2") {
     return(eta_to_smooth_row_poly2_A(eta, mask = mask))
   }
+  if (variant == "smooth_row_poly3") {
+    return(eta_to_smooth_row_poly3_A(eta, mask = mask))
+  }
+  if (variant == "smooth_row_poly3_extreme") {
+    return(eta_to_smooth_row_poly3_extreme_A(eta, mask = mask))
+  }
   if (variant == "monotone_tail_common_middle") {
     return(eta_to_monotone_tail_common_middle_A(eta, mask = mask))
   }
@@ -211,6 +279,12 @@ qn_variant_eta_length <- function(variant = "smooth_row_poly2",
                                   mask = hrr_zero_pattern()) {
   if (variant == "smooth_row_poly2") {
     return(6L)
+  }
+  if (variant == "smooth_row_poly3") {
+    return(9L)
+  }
+  if (variant == "smooth_row_poly3_extreme") {
+    return(16L)
   }
   if (variant == "monotone_tail_common_middle") {
     return(8L)

@@ -16,9 +16,24 @@ figure_n_cores <- function() {
 
 default_out_dir <- function(area) {
   file.path(getwd(), "outputs",
-            paste0(area, "_nominal_Q_refit_smooth_row_poly2_finegrid_targets_",
-                   "hightailbin1p5_tailmoment2_moment5y5yW0p2_",
-                   "gauss5y5yRhodata_fwdBinW1"))
+            paste0(area, "_nominal_Q_refit_smooth_row_poly3_finegrid_targets_",
+                   "hightailbin2_tailmoment2_",
+                   "spot_only_",
+                   "lrMean2p5W10_lrExtremeCap20W5_thetaShrinkW0p05"))
+}
+
+ies_series_cache_file <- function(area, matrix_source, psi_values) {
+  cache_dir <- file.path(getwd(), "cache")
+  dir.create(cache_dir, showWarnings = FALSE, recursive = TRUE)
+  source_tag <- if (matrix_source == "ngmmr") {
+    basename(default_out_dir(area))
+  } else {
+    "hrr_matrices"
+  }
+  psi_tag <- paste0("psi", paste(gsub("[.]", "p", as.character(psi_values)),
+                                 collapse = "_"))
+  file.path(cache_dir, paste0(area, "_ies_series_", source_tag, "_",
+                              psi_tag, ".csv"))
 }
 
 tail_bins <- function(threshold) {
@@ -48,9 +63,17 @@ tail_prob_5y5y_threshold <- function(A, bt, threshold,
 }
 
 compute_area_ies_series <- function(area, psi_values = c(1 / 3, 1.5),
-                                    matrix_source = c("ngmmr", "hrr")) {
+                                    matrix_source = c("ngmmr", "hrr"),
+                                    force = FALSE) {
   area <- normalize_hrr_area(area)
   matrix_source <- match.arg(matrix_source)
+  cache_file <- ies_series_cache_file(area, matrix_source, psi_values)
+  if (file.exists(cache_file) && !force) {
+    out <- read.csv(cache_file)
+    out$date <- as.Date(out$date)
+    return(out)
+  }
+
   res <- load_hrr_monthquart(area)
   dists <- load_hrr_dists(area)
 
@@ -169,7 +192,9 @@ compute_area_ies_series <- function(area, psi_values = c(1 / 3, 1.5),
     }
   }
 
-  do.call(rbind, rows)
+  out <- do.call(rbind, rows)
+  write.csv(out, cache_file, row.names = FALSE)
+  out
 }
 
 read_hrr_p <- function(area) {
@@ -257,9 +282,10 @@ plot_ratio_figure <- function(all_series, output_file) {
   horizons <- c("5y", "10y")
   horizon_labels <- c("5y", "10y")
   psi_values <- sort(unique(all_series$psi))
+  threshold <- 4
 
-  pdf(output_file, pointsize = 15, width = 10.6, height = 7.8)
-  oldpar <- par(mfrow = c(2, 2), mar = c(3.8, 5.4, 2.8, 1.0),
+  pdf(output_file, pointsize = 15, width = 10.6, height = 5.0)
+  oldpar <- par(mfrow = c(1, 2), mar = c(3.8, 5.4, 2.8, 1.0),
                 oma = c(4.0, 0, 0, 0),
                 cex.axis = 1.15, cex.lab = 1.22, cex.main = 1.2)
   on.exit({
@@ -267,38 +293,36 @@ plot_ratio_figure <- function(all_series, output_file) {
     dev.off()
   }, add = TRUE)
 
-  for (threshold in c(4, 5)) {
-    for (area in areas) {
-      s_area <- all_series[all_series$area == area & all_series$threshold == threshold, ]
-      s_area <- s_area[order(s_area$date, s_area$psi), ]
-      ratios <- unlist(lapply(horizons, function(h) {
-        s_area[[paste0("p_", h)]] / s_area[[paste0("qr_", h)]]
-      }))
-      ymax <- min(1.4, 1.15 * max(ratios, 0.66, na.rm = TRUE))
+  for (area in areas) {
+    s_area <- all_series[all_series$area == area & all_series$threshold == threshold, ]
+    s_area <- s_area[order(s_area$date, s_area$psi), ]
+    ratios <- unlist(lapply(horizons, function(h) {
+      s_area[[paste0("p_", h)]] / s_area[[paste0("qr_", h)]]
+    }))
+    ymax <- min(1.4, 1.15 * max(ratios, 0.66, na.rm = TRUE))
 
-      plot(s_area$date[s_area$psi == psi_values[1]],
-           rep(NA_real_, sum(s_area$psi == psi_values[1])),
-           type = "n", ylim = c(0, ymax), xlab = "",
-           ylab = expression(P / Q[horizon]^r),
-           las = 1,
-           main = bquote(.(area_names[[area]]) * ", " * pi > .(threshold) * "%"))
-      grid()
-      abline(h = 0.66, col = "gray65", lwd = 2.5, lty = 3)
+    plot(s_area$date[s_area$psi == psi_values[1]],
+         rep(NA_real_, sum(s_area$psi == psi_values[1])),
+         type = "n", ylim = c(0, ymax), xlab = "",
+         ylab = expression(P / Q[horizon]^r),
+         las = 1,
+         main = bquote(.(area_names[[area]]) * ", " * pi > .(threshold) * "%"))
+    grid()
+    abline(h = 0.66, col = "gray65", lwd = 2.5, lty = 3)
 
-      for (j in seq_along(horizons)) {
-        for (i in seq_along(psi_values)) {
-          idx <- s_area$psi == psi_values[i]
-          ratio <- s_area[[paste0("p_", horizons[j])]][idx] /
-            s_area[[paste0("qr_", horizons[j])]][idx]
-          lines(s_area$date[idx], ratio,
-                col = "black",
-                lwd = 1 + 2 * (i - 1),
-                lty = j)
-        }
+    for (j in seq_along(horizons)) {
+      for (i in seq_along(psi_values)) {
+        idx <- s_area$psi == psi_values[i]
+        ratio <- s_area[[paste0("p_", horizons[j])]][idx] /
+          s_area[[paste0("qr_", horizons[j])]][idx]
+        lines(s_area$date[idx], ratio,
+              col = "black",
+              lwd = 1 + 2 * (i - 1),
+              lty = j)
       }
-
     }
   }
+
   legend_text <- c(
     horizon_labels,
     lapply(psi_values, function(x) bquote(psi == .(round(x, 2)))),
@@ -354,7 +378,7 @@ main <- function() {
   names(hrr_series_list) <- c("EZ", "US")
   ratio_series <- do.call(rbind, hrr_series_list)
   message("Drawing P/Q-ratio figure.")
-  plot_ratio_figure(ratio_series, file.path(out_dir, "figure_ratios.pdf"))
+  plot_ratio_figure(ratio_series, file.path(out_dir, "figure_ratios_HRR.pdf"))
 
   ngmmr_tasks <- lapply(c("EZ", "US"), function(area) {
     list(area = area, matrix_source = "ngmmr")

@@ -1,4 +1,4 @@
-## Estimate nominal RN transition matrices from 5y, 10y, and 5y5y targets.
+## Estimate nominal RN transition matrices from option-implied probability targets.
 
 suppressPackageStartupMessages({
   library(haven)
@@ -14,8 +14,8 @@ make_tail_weight_spec <- function(tail_bin_weight = 3,
   tail_weight_side <- match.arg(tail_weight_side)
   bin_weights <- rep(1, 24)
   ## In each 8-bin block, bins 7 and 8 are the >4% inflation tail. Optionally
-  ## bins 1 and 2 (<0%) can also be overweighted.  The 5y5y block is kept as
-  ## a loose auxiliary target, so it receives its own lower uniform weight.
+  ## bins 1 and 2 (<0%) can also be overweighted. The optional 5y5y block is
+  ## not used in the baseline objective.
   tail_bins_one_block <- if (tail_weight_side == "both") c(1:2, 7:8) else 7:8
   tail_bins <- c(tail_bins_one_block,
                  8 + tail_bins_one_block)
@@ -37,8 +37,6 @@ weighted_finegrid_loss <- function(model_g5, model_g10, model_fwd,
                                    target_g5, target_g10, target_fwd,
                                    weight_spec,
                                    include_fwd = TRUE,
-                                   fwd_tail4_proxy = NA_real_,
-                                   fwd_tail4_proxy_weight = 0,
                                    fwd_tail4_bounds = c(NA_real_, NA_real_),
                                    fwd_tail4_bounds_weight = 0) {
   if (include_fwd) {
@@ -58,8 +56,8 @@ weighted_finegrid_loss <- function(model_g5, model_g10, model_fwd,
     sum(model_g10[7:8]) - sum(target_g10[7:8])
   )
   if (include_fwd) {
-    ## The 5y5y target, when used, is a loose auxiliary Gaussian proxy.  Do
-    ## not also impose the explicit tail-moment overweight on it.
+    ## The optional 5y5y target is not part of the baseline specification.
+    ## Do not also impose the explicit tail-moment overweight on it.
   }
   if (weight_spec$tail_weight_side == "both") {
     low_tail_errors <- c(
@@ -74,12 +72,6 @@ weighted_finegrid_loss <- function(model_g5, model_g10, model_fwd,
   }
   tail_loss <- weight_spec$tail_moment_weight * mean(tail_errors^2)
 
-  proxy_loss <- 0
-  if (is.finite(fwd_tail4_proxy) && fwd_tail4_proxy_weight > 0) {
-    proxy_loss <- fwd_tail4_proxy_weight *
-      (sum(model_fwd[7:8]) - fwd_tail4_proxy)^2
-  }
-
   bounds_loss <- 0
   if (fwd_tail4_bounds_weight > 0 &&
       length(fwd_tail4_bounds) == 2 &&
@@ -90,7 +82,7 @@ weighted_finegrid_loss <- function(model_g5, model_g10, model_fwd,
     bounds_loss <- fwd_tail4_bounds_weight * (below^2 + above^2)
   }
 
-  bin_loss + tail_loss + proxy_loss + bounds_loss
+  bin_loss + tail_loss + bounds_loss
 }
 
 stationary_distribution <- function(A) {
@@ -149,98 +141,6 @@ adjust_forward_proxy_bins <- function(base_bins, tail_row) {
   out / sum(out)
 }
 
-moment_proxy_5y5y_tail4 <- function(g5, g10,
-                                    bin_values_pct = c(-2, -0.5, 0.5, 1.5,
-                                                       2.5, 3.5, 4.5, 6),
-                                    rho = 0,
-                                    min_sd = 0.25) {
-  mean5 <- sum(g5 * bin_values_pct)
-  mean10 <- sum(g10 * bin_values_pct)
-  var5 <- sum(g5 * (bin_values_pct - mean5)^2)
-  var10 <- sum(g10 * (bin_values_pct - mean10)^2)
-
-  mean_fwd <- 2 * mean10 - mean5
-  disc <- 4 * var10 - var5 * (1 - rho^2)
-  if (!is.finite(disc) || disc < 0) {
-    return(NA_real_)
-  }
-  sd_fwd <- -rho * sqrt(var5) + sqrt(disc)
-  sd_fwd <- max(sd_fwd, min_sd)
-  out <- 1 - pnorm(4, mean = mean_fwd, sd = sd_fwd)
-  min(max(out, 0), 1)
-}
-
-gaussian_5y5y_bins <- function(g5, g10,
-                               rho,
-                               bin_values_pct = c(-2, -0.5, 0.5, 1.5,
-                                                  2.5, 3.5, 4.5, 6),
-                               pi_lim_pct = c(seq(-1, 5, by = 1), Inf),
-                               min_sd = 0.25) {
-  mean5 <- sum(g5 * bin_values_pct)
-  mean10 <- sum(g10 * bin_values_pct)
-  var5 <- sum(g5 * (bin_values_pct - mean5)^2)
-  var10 <- sum(g10 * (bin_values_pct - mean10)^2)
-
-  mean_fwd <- 2 * mean10 - mean5
-  disc <- 4 * var10 - var5 * (1 - rho^2)
-  if (!is.finite(disc) || disc < 0) {
-    return(rep(NA_real_, length(pi_lim_pct)))
-  }
-  sd_fwd <- -rho * sqrt(var5) + sqrt(disc)
-  sd_fwd <- max(sd_fwd, min_sd)
-
-  lower <- c(-Inf, pi_lim_pct[-length(pi_lim_pct)])
-  upper <- pi_lim_pct
-  out <- pnorm(upper, mean = mean_fwd, sd = sd_fwd) -
-    pnorm(lower, mean = mean_fwd, sd = sd_fwd)
-  out <- pmax(out, 0)
-  out / sum(out)
-}
-
-estimate_realized_forward_avg_rho <- function(infl_pct, window = 60L) {
-  infl_raw <- as.numeric(infl_pct)
-  infl_pct <- infl_raw
-  infl_pct[infl_pct == 0] <- NA_real_
-  n <- length(infl_pct)
-  if (n < 2 * window) {
-    return(NA_real_)
-  }
-
-  compute_rho <- function(x) {
-    starts <- seq_len(length(x) - 2 * window + 1L)
-    first_avg <- vapply(starts, function(i) {
-      mean(x[i:(i + window - 1L)], na.rm = FALSE)
-    }, numeric(1))
-    second_avg <- vapply(starts, function(i) {
-      mean(x[(i + window):(i + 2L * window - 1L)], na.rm = FALSE)
-    }, numeric(1))
-    ok <- is.finite(first_avg) & is.finite(second_avg)
-    if (sum(ok) < 5) {
-      return(NA_real_)
-    }
-    cor(first_avg[ok], second_avg[ok])
-  }
-
-  rho <- compute_rho(infl_pct)
-  if (!is.finite(rho) && any(infl_raw == 0, na.rm = TRUE)) {
-    ## Useful for the EA file, where the zero-as-missing convention is too strict.
-    rho <- compute_rho(infl_raw)
-  }
-  rho
-}
-
-resolve_fwd_proxy_rho <- function(value, dists) {
-  if (identical(tolower(value), "data")) {
-    rho <- estimate_realized_forward_avg_rho(as.numeric(dists$infl))
-  } else {
-    rho <- suppressWarnings(as.numeric(value))
-  }
-  if (!is.finite(rho)) {
-    stop("FWD_PROXY_RHO must be numeric or 'data', and the data estimate must be finite.")
-  }
-  max(min(rho, 0.999), -0.999)
-}
-
 make_year_month_index <- function(dists) {
   years <- as.integer(dists$years[, 1])
   last_month <- as.integer(dists$last.month[1, 1])
@@ -258,11 +158,8 @@ make_year_month_index <- function(dists) {
 }
 
 make_finegrid_targets <- function(res, dists,
-                                  area = Sys.getenv("AREA", unset = "US"),
-                                  fwd_target_source = c("hrr", "gaussian"),
-                                  fwd_proxy_rho = 0) {
+                                  area = Sys.getenv("AREA", unset = "US")) {
   area <- normalize_hrr_area(area)
-  fwd_target_source <- match.arg(fwd_target_source)
   fs_data <- res$fs.data
   n_month <- dim(fs_data)[2]
   ym <- make_year_month_index(dists)
@@ -271,7 +168,6 @@ make_finegrid_targets <- function(res, dists,
   g5 <- matrix(NA_real_, 8, n_month)
   g10 <- matrix(NA_real_, 8, n_month)
   fwd <- matrix(NA_real_, 8, n_month)
-  fwd_moment_proxy_tail4 <- rep(NA_real_, n_month)
   fwd_tail4_lower <- rep(NA_real_, n_month)
   fwd_tail4_upper <- rep(NA_real_, n_month)
 
@@ -293,26 +189,18 @@ make_finegrid_targets <- function(res, dists,
   for (m in seq_len(n_month)) {
     g5[, m] <- finegrid_zc_bins(dists, ym$year_id[m], ym$month[m], horizon = 5)
     g10[, m] <- finegrid_zc_bins(dists, ym$year_id[m], ym$month[m], horizon = 10)
-    fwd_moment_proxy_tail4[m] <- moment_proxy_5y5y_tail4(
-      g5[, m], g10[, m], rho = fwd_proxy_rho
-    )
     tail_row <- tails_55[tails_55$year == ym$year[m] & tails_55$month == ym$month[m], ]
     if (nrow(tail_row) != 1) {
       stop(sprintf("Could not find unique 5y5y tail row for month %03d.", m))
     }
-    if (fwd_target_source == "gaussian") {
-      fwd[, m] <- gaussian_5y5y_bins(g5[, m], g10[, m], rho = fwd_proxy_rho)
-    } else {
-      fwd[, m] <- adjust_forward_proxy_bins(fs_data[, m], tail_row)
-    }
+    fwd[, m] <- adjust_forward_proxy_bins(fs_data[, m], tail_row)
   }
 
   list(g5 = g5, g10 = g10, fwd = fwd,
-       fwd_moment_proxy_tail4 = fwd_moment_proxy_tail4,
        fwd_tail4_lower = fwd_tail4_lower,
        fwd_tail4_upper = fwd_tail4_upper,
-       fwd_target_source = fwd_target_source,
-       fwd_proxy_rho = fwd_proxy_rho,
+       fwd_target_source = "hrr",
+       fwd_proxy_rho = NA_real_,
        year_month = ym)
 }
 
@@ -329,7 +217,6 @@ fit_one_month_finegrid <- function(month_id,
                                    eta0,
                                    weight_spec,
                                    include_fwd_target,
-                                   fwd_proxy_weight,
                                    fwd_bounds_weight,
                                    lr_mean_target_pct,
                                    lr_mean_weight,
@@ -338,11 +225,12 @@ fit_one_month_finegrid <- function(month_id,
                                    lr_extreme_weight,
                                    persistence_cap,
                                    persistence_weight,
+                                   theta_center,
+                                   theta_shrink_weight,
                                    pi_bar) {
   target_g5 <- targets$g5[, month_id]
   target_g10 <- targets$g10[, month_id]
   target_fwd <- targets$fwd[, month_id]
-  fwd_tail4_proxy <- targets$fwd_moment_proxy_tail4[month_id]
   fwd_tail4_bounds <- c(targets$fwd_tail4_lower[month_id],
                         targets$fwd_tail4_upper[month_id])
   bt <- bts[month_id]
@@ -360,8 +248,6 @@ fit_one_month_finegrid <- function(month_id,
       target_fwd = target_fwd,
       weight_spec = weight_spec,
       include_fwd = include_fwd_target,
-      fwd_tail4_proxy = fwd_tail4_proxy,
-      fwd_tail4_proxy_weight = fwd_proxy_weight,
       fwd_tail4_bounds = fwd_tail4_bounds,
       fwd_tail4_bounds_weight = fwd_bounds_weight
     )
@@ -378,6 +264,10 @@ fit_one_month_finegrid <- function(month_id,
     if (persistence_weight > 0) {
       excess <- pmax(c(A[1, 1], A[nrow(A), ncol(A)]) - persistence_cap, 0)
       loss <- loss + persistence_weight * mean(excess^2)
+    }
+    if (!is.null(theta_center) && theta_shrink_weight > 0) {
+      loss <- loss + theta_shrink_weight *
+        mean(((eta - theta_center$center) / theta_center$scale)^2)
     }
     loss
   }
@@ -413,8 +303,6 @@ fit_one_month_finegrid <- function(month_id,
       target_fwd = target_fwd,
       weight_spec = weight_spec,
       include_fwd = include_fwd_target,
-      fwd_tail4_proxy = fwd_tail4_proxy,
-      fwd_tail4_proxy_weight = fwd_proxy_weight,
       fwd_tail4_bounds = fwd_tail4_bounds,
       fwd_tail4_bounds_weight = fwd_bounds_weight
     ),
@@ -448,7 +336,6 @@ fit_one_month_finegrid <- function(month_id,
     qtail4_5y5y_target = sum(target_fwd[7:8]),
     qtail4_5y5y_hrr = sum(hrr_fwd[7:8]),
     qtail4_5y5y_ngmmr = sum(fwd[7:8]),
-    qtail4_5y5y_moment_proxy = fwd_tail4_proxy,
     qtail4_5y5y_lower_bound = fwd_tail4_bounds[1],
     qtail4_5y5y_upper_bound = fwd_tail4_bounds[2],
     qtail4_5y5y_bound_violation_hrr =
@@ -475,6 +362,13 @@ fit_one_month_finegrid <- function(month_id,
     q88_ngmmr = A[nrow(A), ncol(A)],
     persistence_penalty_ngmmr =
       persistence_weight * mean(pmax(c(A[1, 1], A[nrow(A), ncol(A)]) - persistence_cap, 0)^2),
+    theta_shrink_weight = theta_shrink_weight,
+    theta_shrink_penalty_ngmmr = if (!is.null(theta_center)) {
+      theta_shrink_weight *
+        mean(((fit$par - theta_center$center) / theta_center$scale)^2)
+    } else {
+      0
+    },
     fwd_proxy_weight = fwd_proxy_weight,
     fwd_bounds_weight = fwd_bounds_weight,
     tail_bin_weight = weight_spec$tail_bin_weight,
@@ -520,7 +414,7 @@ plot_finegrid_rmse <- function(diagnostics, output_file) {
   plot_one(diagnostics$rmse5_hrr_pp, diagnostics$rmse5_ngmmr_pp, "5y")
   plot_one(diagnostics$rmse10_hrr_pp, diagnostics$rmse10_ngmmr_pp, "10y")
   plot_one(diagnostics$rmse_fwd_hrr_pp, diagnostics$rmse_fwd_ngmmr_pp, "5y5y")
-  mtext("Fine-grid/proxy 24-target fit: HRR matrix vs. NGMMR",
+  mtext("Fine-grid target fit: HRR matrix vs. NGMMR",
         outer = TRUE, font = 2)
 }
 
@@ -532,13 +426,10 @@ main <- function() {
   nm_iter <- as.integer(Sys.getenv("NM_ITER", unset = "1000"))
   tail_bin_weight <- as.numeric(Sys.getenv("TAIL_BIN_WEIGHT", unset = "1.5"))
   tail_moment_weight <- as.numeric(Sys.getenv("TAIL_MOMENT_WEIGHT", unset = "2"))
-  fwd_bin_weight <- as.numeric(Sys.getenv("FWD_BIN_WEIGHT", unset = "1"))
-  fwd_tail_bin_weight <- as.numeric(Sys.getenv("FWD_TAIL_BIN_WEIGHT", unset = as.character(tail_bin_weight)))
+  fwd_bin_weight <- as.numeric(Sys.getenv("FWD_BIN_WEIGHT", unset = "0"))
+  fwd_tail_bin_weight <- as.numeric(Sys.getenv("FWD_TAIL_BIN_WEIGHT", unset = "0"))
   tail_weight_side <- Sys.getenv("TAIL_WEIGHT_SIDE", unset = "high")
-  include_fwd_target <- as.logical(as.integer(Sys.getenv("INCLUDE_5Y5Y_TARGET", unset = "1")))
-  fwd_target_source <- Sys.getenv("FWD_TARGET_SOURCE", unset = "gaussian")
-  fwd_proxy_rho_input <- Sys.getenv("FWD_PROXY_RHO", unset = "data")
-  fwd_proxy_weight <- as.numeric(Sys.getenv("FWD_PROXY_WEIGHT", unset = "0.2"))
+  include_fwd_target <- as.logical(as.integer(Sys.getenv("INCLUDE_5Y5Y_TARGET", unset = "0")))
   fwd_bounds_weight <- as.numeric(Sys.getenv("FWD_BOUNDS_WEIGHT", unset = "0"))
   lr_mean_target_pct <- as.numeric(Sys.getenv("LR_MEAN_TARGET_PCT", unset = "2.5"))
   lr_mean_weight <- as.numeric(Sys.getenv("LR_MEAN_WEIGHT", unset = "0"))
@@ -546,6 +437,8 @@ main <- function() {
   lr_extreme_weight <- as.numeric(Sys.getenv("LR_EXTREME_WEIGHT", unset = "0"))
   persistence_cap <- as.numeric(Sys.getenv("PERSISTENCE_CAP", unset = "0.85"))
   persistence_weight <- as.numeric(Sys.getenv("PERSISTENCE_WEIGHT", unset = "0"))
+  theta_center_file <- Sys.getenv("THETA_CENTER_FILE", unset = "")
+  theta_shrink_weight <- as.numeric(Sys.getenv("THETA_SHRINK_WEIGHT", unset = "0"))
   eta_start_file <- Sys.getenv("ETA_START_FILE", unset = "")
   variant <- Sys.getenv("MODEL_VARIANT", unset = "smooth_row_poly2")
   pi_bar <- extended_pi_grid(8L)
@@ -560,6 +453,26 @@ main <- function() {
   mask <- hrr_zero_pattern()
   eta_length <- qn_variant_eta_length(variant, mask = mask)
   eta0 <- rep(0, eta_length)
+  theta_center <- NULL
+  if (nzchar(theta_center_file)) {
+    theta_center_df <- read.csv(theta_center_file, check.names = FALSE)
+    theta_cols <- paste0("eta", seq_len(eta_length))
+    theta_scale_cols <- paste0(theta_cols, "_scale")
+    if (!all(theta_cols %in% names(theta_center_df))) {
+      stop(sprintf("THETA_CENTER_FILE must contain eta1,...,eta%d columns.",
+                   eta_length))
+    }
+    theta_scale <- if (all(theta_scale_cols %in% names(theta_center_df))) {
+      as.numeric(theta_center_df[1, theta_scale_cols])
+    } else {
+      rep(1, eta_length)
+    }
+    theta_center <- list(
+      center = as.numeric(theta_center_df[1, theta_cols]),
+      scale = pmax(theta_scale, 0.5)
+    )
+    eta0 <- theta_center$center
+  }
 
   weight_tag <- sprintf("%stailbin%s_tailmoment%s",
                         tail_weight_side,
@@ -568,20 +481,6 @@ main <- function() {
   out_name <- paste0("nominal_Q_refit_", variant, "_finegrid_targets_", weight_tag)
   if (!include_fwd_target) {
     out_name <- paste0(out_name, "_spot_only")
-  }
-  if (fwd_proxy_weight > 0) {
-    proxy_tag <- gsub("\\.", "p", format(fwd_proxy_weight, trim = TRUE))
-    out_name <- paste0(out_name, "_moment5y5yW", proxy_tag)
-  }
-  if (include_fwd_target && fwd_target_source == "gaussian") {
-    rho_tag <- gsub("\\.", "p", gsub("-", "m", fwd_proxy_rho_input))
-    fwd_weight_tag <- gsub("\\.", "p", format(fwd_bin_weight, trim = TRUE))
-    out_name <- paste0(out_name, "_gauss5y5yRho", rho_tag,
-                       "_fwdBinW", fwd_weight_tag)
-    if (!isTRUE(all.equal(fwd_tail_bin_weight, tail_bin_weight))) {
-      fwd_tail_weight_tag <- gsub("\\.", "p", format(fwd_tail_bin_weight, trim = TRUE))
-      out_name <- paste0(out_name, "_fwdTailW", fwd_tail_weight_tag)
-    }
   }
   if (fwd_bounds_weight > 0) {
     bounds_tag <- gsub("\\.", "p", format(fwd_bounds_weight, trim = TRUE))
@@ -602,19 +501,17 @@ main <- function() {
     persistence_weight_tag <- gsub("\\.", "p", format(persistence_weight, trim = TRUE))
     out_name <- paste0(out_name, "_persistCap", persistence_cap_tag, "W", persistence_weight_tag)
   }
+  if (!is.null(theta_center) && theta_shrink_weight > 0) {
+    theta_shrink_tag <- gsub("\\.", "p", format(theta_shrink_weight, trim = TRUE))
+    out_name <- paste0(out_name, "_thetaShrinkW", theta_shrink_tag)
+  }
   out_name <- paste0(area, "_", out_name)
   out_dir <- file.path(getwd(), "outputs", out_name)
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
   res <- load_hrr_monthquart(area)
   dists <- load_hrr_dists(area)
-  fwd_proxy_rho <- resolve_fwd_proxy_rho(fwd_proxy_rho_input, dists)
-  targets <- make_finegrid_targets(
-    res, dists,
-    area = area,
-    fwd_target_source = fwd_target_source,
-    fwd_proxy_rho = fwd_proxy_rho
-  )
+  targets <- make_finegrid_targets(res, dists, area = area)
 
   gs_model <- unwrap_matlab_cell(res$gs.model)
   fs_model <- unwrap_matlab_cell(res$fs.model)
@@ -640,20 +537,18 @@ main <- function() {
     rownames(eta_start_by_month) <- as.character(eta_start_df$month)
   }
 
-  message(sprintf("Running %s fine-grid/proxy 24-target fit for %d dates with %d cores.",
+  target_label <- if (include_fwd_target) "5y/10y/5y5y" else "5y/10y"
+  message(sprintf("Running %s fine-grid target fit for %d dates with %d cores.",
                   area, length(month_ids), n_cores))
+  message(sprintf("Target horizons: %s.", target_label))
   message(sprintf("Variant: %s.", variant))
   message(sprintf("Weights: side=%s, tail bins=%g, explicit tail moments=%g.",
                   tail_weight_side, tail_bin_weight, tail_moment_weight))
-  message(sprintf("5y5y bin weight: %g.", fwd_bin_weight))
-  message(sprintf("5y5y high-tail bin weight: %g.", fwd_tail_bin_weight))
   message(sprintf("Objective includes 5y5y target: %s.",
                   ifelse(include_fwd_target, "yes", "no")))
-  message(sprintf("5y5y target source: %s; rho=%.4f.",
-                  fwd_target_source, fwd_proxy_rho))
-  if (fwd_proxy_weight > 0) {
-    message(sprintf("Objective includes 5y/10y moment-implied 5y5y >4 proxy with weight %g.",
-                    fwd_proxy_weight))
+  if (include_fwd_target) {
+    message(sprintf("5y5y bin weight: %g.", fwd_bin_weight))
+    message(sprintf("5y5y high-tail bin weight: %g.", fwd_tail_bin_weight))
   }
   if (fwd_bounds_weight > 0) {
     message(sprintf("Objective penalizes 5y5y >4 Frechet-bound violations with weight %g.",
@@ -670,6 +565,10 @@ main <- function() {
   if (persistence_weight > 0) {
     message(sprintf("Objective penalizes Q11 and Q88 above %.2f%% with weight %g.",
                     100 * persistence_cap, persistence_weight))
+  }
+  if (!is.null(theta_center) && theta_shrink_weight > 0) {
+    message(sprintf("Objective shrinks eta toward %s with weight %g.",
+                    theta_center_file, theta_shrink_weight))
   }
   if (!is.null(eta_start_by_month)) {
     message(sprintf("Warm starts: %s", eta_start_file))
@@ -698,7 +597,6 @@ main <- function() {
       },
       weight_spec = weight_spec,
       include_fwd_target = include_fwd_target,
-      fwd_proxy_weight = fwd_proxy_weight,
       fwd_bounds_weight = fwd_bounds_weight,
       lr_mean_target_pct = lr_mean_target_pct,
       lr_mean_weight = lr_mean_weight,
@@ -707,6 +605,8 @@ main <- function() {
       lr_extreme_weight = lr_extreme_weight,
       persistence_cap = persistence_cap,
       persistence_weight = persistence_weight,
+      theta_center = theta_center,
+      theta_shrink_weight = theta_shrink_weight,
       pi_bar = pi_bar
     )
     if (verbose) {
@@ -787,8 +687,7 @@ main <- function() {
     metric = c("RMSE 5y+10y+5y5y", "RMSE 5y", "RMSE 10y", "RMSE 5y5y",
                "Tail <0 5y", "Tail >4 5y",
                "Tail <0 10y", "Tail >4 10y",
-               "Tail <0 5y5y", "Tail >4 5y5y",
-               "Tail >4 5y5y moment proxy"),
+               "Tail <0 5y5y", "Tail >4 5y5y"),
     mean_hrr_pp = c(mean(diagnostics$rmse24_hrr_pp),
                     mean(diagnostics$rmse5_hrr_pp),
                     mean(diagnostics$rmse10_hrr_pp),
@@ -804,9 +703,7 @@ main <- function() {
                     rmse_pp(diagnostics$qtail0_5y5y_hrr -
                               diagnostics$qtail0_5y5y_target),
                     rmse_pp(diagnostics$qtail4_5y5y_hrr -
-                              diagnostics$qtail4_5y5y_target),
-                    rmse_pp(diagnostics$qtail4_5y5y_hrr -
-                              diagnostics$qtail4_5y5y_moment_proxy)),
+                              diagnostics$qtail4_5y5y_target)),
     mean_ngmmr_pp = c(mean(diagnostics$rmse24_ngmmr_pp),
                       mean(diagnostics$rmse5_ngmmr_pp),
                       mean(diagnostics$rmse10_ngmmr_pp),
@@ -822,9 +719,7 @@ main <- function() {
                       rmse_pp(diagnostics$qtail0_5y5y_ngmmr -
                                 diagnostics$qtail0_5y5y_target),
                       rmse_pp(diagnostics$qtail4_5y5y_ngmmr -
-                                diagnostics$qtail4_5y5y_target),
-                      rmse_pp(diagnostics$qtail4_5y5y_ngmmr -
-                                diagnostics$qtail4_5y5y_moment_proxy))
+                                diagnostics$qtail4_5y5y_target))
   )
   message("\nDone.")
   message(sprintf("Diagnostics: %s", file.path(out_dir, "diagnostics.csv")))

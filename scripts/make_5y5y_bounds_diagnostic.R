@@ -147,31 +147,12 @@ forward_average_bins_model <- function(A, bt,
   out / sum(out)
 }
 
-gaussian_forward_tail_proxy <- function(p5, p10, rho,
-                                        support_pct,
-                                        threshold,
-                                        min_sd = 0.25) {
-  mean5 <- sum(p5 * support_pct)
-  mean10 <- sum(p10 * support_pct)
-  var5 <- sum(p5 * (support_pct - mean5)^2)
-  var10 <- sum(p10 * (support_pct - mean10)^2)
-
-  mean_fwd <- 2 * mean10 - mean5
-  disc <- 4 * var10 - var5 * (1 - rho^2)
-  if (!is.finite(disc) || disc < 0) {
-    return(NA_real_)
-  }
-
-  sd_fwd <- -rho * sqrt(var5) + sqrt(disc)
-  sd_fwd <- max(sd_fwd, min_sd)
-  min(max(1 - pnorm(threshold, mean = mean_fwd, sd = sd_fwd), 0), 1)
-}
-
 default_estimation_out_dir <- function(area) {
   suffix <- paste0(
-    "_nominal_Q_refit_smooth_row_poly2_finegrid_targets_",
-    "hightailbin1p5_tailmoment2_moment5y5yW0p2_",
-    "gauss5y5yRhodata_fwdBinW1"
+    "_nominal_Q_refit_smooth_row_poly3_finegrid_targets_",
+    "hightailbin2_tailmoment2_",
+    "spot_only_",
+    "lrMean2p5W10_lrExtremeCap20W5_thetaShrinkW0p05"
   )
   file.path("outputs", paste0(area, suffix))
 }
@@ -207,13 +188,7 @@ make_bounds_series <- function(area = "US", threshold = 4) {
       threshold = threshold,
       lower = b[["lower"]],
       upper = b[["upper"]],
-      gaussian_rho_min = gaussian_forward_tail_proxy(p5, p10, rho = -0.7,
-                                                     support_pct = 100 * support,
-                                                     threshold = threshold),
-      gaussian_rho_max = gaussian_forward_tail_proxy(p5, p10, rho = 0.7,
-                                                     support_pct = 100 * support,
-                                                     threshold = threshold),
-      hrr_proxy = tail_row[[hrr_col]],
+      hrr_series = tail_row[[hrr_col]],
       ngmmr_5y5y = sum(forward_average_bins_model(
         results[[m]]$A, bts[m]
       )[tail_idx])
@@ -238,9 +213,7 @@ plot_bounds_series <- function(bounds, output_file) {
   for (area in areas) {
     for (threshold in c(4, 5)) {
     b <- bounds[bounds$area == area & bounds$threshold == threshold, ]
-    ymax <- max(100 * c(b$lower, b$upper,
-                        b$gaussian_rho_min, b$gaussian_rho_max,
-                        b$hrr_proxy, b$ngmmr_5y5y),
+    ymax <- max(100 * c(b$lower, b$upper, b$hrr_series, b$ngmmr_5y5y),
                 na.rm = TRUE) * 1.08
     plot(b$date, 100 * b$upper, type = "n",
          ylim = c(0, ymax), las = 1, xlab = "", ylab = "Probability (%)",
@@ -249,13 +222,9 @@ plot_bounds_series <- function(bounds, output_file) {
     polygon(c(b$date, rev(b$date)),
             100 * c(b$lower, rev(b$upper)),
             col = "gray88", border = NA)
-    lines(b$date, 100 * b$gaussian_rho_min,
-          col = "gray45", lwd = 1.7, lty = 3)
-    lines(b$date, 100 * b$gaussian_rho_max,
-          col = "gray45", lwd = 1.7, lty = 3)
     lines(b$date, 100 * b$ngmmr_5y5y,
           col = "black", lwd = 2.6, lty = 1)
-    lines(b$date, 100 * b$hrr_proxy,
+    lines(b$date, 100 * b$hrr_series,
           col = "black", lwd = 2.6, lty = 2)
     }
   }
@@ -264,12 +233,11 @@ plot_bounds_series <- function(bounds, output_file) {
   plot.new()
   legend("bottom",
          legend = c("Bounds",
-                    "Gaussian",
                     "NGMMR",
-                    "HRR proxy"),
-         col = c("gray88", "gray45", "black", "black"),
-         lty = c(1, 3, 1, 2),
-         lwd = c(8, 1.7, 2.6, 2.6),
+                    "HRR 5y5y"),
+         col = c("gray88", "black", "black"),
+         lty = c(1, 1, 2),
+         lwd = c(8, 2.6, 2.6),
          bg = "white",
          box.col = "gray80",
          cex = 0.76,
@@ -289,8 +257,8 @@ main <- function() {
       make_bounds_series(area, threshold)
     }))
   }))
-  bounds$below_lower <- bounds$hrr_proxy < bounds$lower - 1e-8
-  bounds$above_upper <- bounds$hrr_proxy > bounds$upper + 1e-8
+  bounds$below_lower <- bounds$hrr_series < bounds$lower - 1e-8
+  bounds$above_upper <- bounds$hrr_series > bounds$upper + 1e-8
 
   csv_file <- file.path(out_dir, "5y5y_tail_bounds_from_5y_10y.csv")
   summary_file <- file.path(out_dir, "5y5y_tail_bounds_from_5y_10y_summary.csv")
@@ -304,14 +272,12 @@ main <- function() {
         threshold = threshold,
         mean_lower = mean(b$lower),
         mean_upper = mean(b$upper),
-        mean_gaussian_rho_min = mean(b$gaussian_rho_min, na.rm = TRUE),
-        mean_gaussian_rho_max = mean(b$gaussian_rho_max, na.rm = TRUE),
-        mean_hrr_proxy = mean(b$hrr_proxy),
+        mean_hrr_series = mean(b$hrr_series),
         mean_ngmmr = mean(b$ngmmr_5y5y),
         share_hrr_below_lower = mean(b$below_lower),
         share_hrr_above_upper = mean(b$above_upper),
-        min_hrr_minus_lower_pp = 100 * min(b$hrr_proxy - b$lower),
-        max_hrr_minus_upper_pp = 100 * max(b$hrr_proxy - b$upper)
+        min_hrr_minus_lower_pp = 100 * min(b$hrr_series - b$lower),
+        max_hrr_minus_upper_pp = 100 * max(b$hrr_series - b$upper)
       )
     }))
   })

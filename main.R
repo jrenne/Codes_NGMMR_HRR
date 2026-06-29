@@ -7,6 +7,9 @@
 REESTIMATE <- FALSE
 AREAS <- c("US", "EZ")
 N_CORES <- 8
+NB_LOOP <- 3
+NLMINB_ITER <- 20
+NM_ITER <- 1000
 
 run_side_effect_script <- function(file) {
   sys.source(file.path("scripts", file), envir = new.env(parent = globalenv()))
@@ -41,19 +44,31 @@ restore_env <- function(old) {
 }
 
 estimate_area <- function(area) {
+  theta_center_file <- file.path(
+    "tempo", "smooth_row_poly3_shrinkage",
+    paste0(area, "_theta_center_mean_poly3_scaled.csv")
+  )
   old <- set_env(
     AREA = area,
     N_CORES = as.character(N_CORES),
-    MODEL_VARIANT = "smooth_row_poly2",
+    NB_LOOP = as.character(NB_LOOP),
+    NLMINB_ITER = as.character(NLMINB_ITER),
+    NM_ITER = as.character(NM_ITER),
+    MODEL_VARIANT = "smooth_row_poly3",
     TAIL_WEIGHT_SIDE = "high",
-    TAIL_BIN_WEIGHT = "1.5",
+    TAIL_BIN_WEIGHT = "2",
     TAIL_MOMENT_WEIGHT = "2",
-    INCLUDE_5Y5Y_TARGET = "1",
-    FWD_TARGET_SOURCE = "gaussian",
-    FWD_PROXY_RHO = "data",
-    FWD_PROXY_WEIGHT = "0.2",
-    FWD_BIN_WEIGHT = "1",
-    FWD_BOUNDS_WEIGHT = "0"
+    INCLUDE_5Y5Y_TARGET = "0",
+    FWD_BIN_WEIGHT = "0",
+    FWD_TAIL_BIN_WEIGHT = "0",
+    FWD_BOUNDS_WEIGHT = "0",
+    LR_MEAN_TARGET_PCT = "2.5",
+    LR_MEAN_WEIGHT = "10",
+    LR_EXTREME_CAP = "0.20",
+    LR_EXTREME_WEIGHT = "5",
+    PERSISTENCE_WEIGHT = "0",
+    THETA_CENTER_FILE = theta_center_file,
+    THETA_SHRINK_WEIGHT = "0.05"
   )
   on.exit(restore_env(old), add = TRUE)
 
@@ -62,9 +77,10 @@ estimate_area <- function(area) {
 
 required_estimation_outputs <- function() {
   suffix <- paste0(
-    "_nominal_Q_refit_smooth_row_poly2_finegrid_targets_",
-    "hightailbin1p5_tailmoment2_moment5y5yW0p2_",
-    "gauss5y5yRhodata_fwdBinW1"
+    "_nominal_Q_refit_smooth_row_poly3_finegrid_targets_",
+    "hightailbin2_tailmoment2_",
+    "spot_only_",
+    "lrMean2p5W10_lrExtremeCap20W5_thetaShrinkW0p05"
   )
   files <- unlist(lapply(AREAS, function(area) {
     out_dir <- file.path("outputs", paste0(area, suffix))
@@ -107,9 +123,6 @@ run_all <- function() {
 
   message("\n5. Frechet bounds for the 5y5y high-inflation probability")
   run_script_main("make_5y5y_bounds_diagnostic.R")
-
-  message("\n6. Gaussian and Student-t 5y5y proxy diagnostic")
-  run_script_main("make_5y5y_student_proxy_diagnostic.R")
 
   message("\nDone. Main outputs have been regenerated.")
 }
